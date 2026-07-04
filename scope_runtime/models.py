@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from datetime import datetime
 
 
@@ -56,15 +56,27 @@ class Constraint:
 
 @dataclass
 class Falsifier:
-    """A falsifier for testing candidate viability."""
+    """A falsifier for testing candidate viability.
+
+    `test_method` remains the human-readable description (for reporting).
+    `check` is the actual executable predicate: given a candidate, return
+    True if the falsifier TRIGGERS (i.e. the candidate fails this check).
+    If `check` is None, the falsifier is descriptive-only and cannot
+    contribute to elimination -- this is intentional so an unwired
+    falsifier can't silently pretend to have been applied.
+    """
     name: str
     description: str
     test_method: str
     domain: str
     criticality: float  # 0.0 to 1.0
+    check: Optional[Callable[["CandidateStructure"], bool]] = None
     applied: bool = False
     result: Optional[bool] = None  # True if falsifier triggered
     evidence: Optional[str] = None
+
+    def is_executable(self) -> bool:
+        return self.check is not None
 
 
 @dataclass
