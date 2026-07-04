@@ -1,0 +1,317 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index e6be0c7..e6eef29 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -11,9 +11,6 @@ requires-python = ">=3.8"
+ license = { text = "MIT" }
+ authors = [ { name = "mitchell-d00" } ]
+ 
+-[tool.setuptools]
+-packages = { find = {} }
+-
+ [tool.setuptools.packages.find]
+ where = ["."]
+ include = ["scope_runtime*", "scope_utils*"]
+diff --git a/scope_runtime/models.py b/scope_runtime/models.py
+index 77cbccc..e7f9fd6 100644
+--- a/scope_runtime/models.py
++++ b/scope_runtime/models.py
+@@ -2,7 +2,7 @@
+ 
+ from dataclasses import dataclass, field
+ from enum import Enum
+-from typing import Any, Dict, List, Optional
++from typing import Any, Callable, Dict, List, Optional
+ from datetime import datetime
+ 
+ 
+@@ -56,16 +56,28 @@ class Constraint:
+ 
+ @dataclass
+ class Falsifier:
+-    """A falsifier for testing candidate viability."""
++    """A falsifier for testing candidate viability.
++
++    `test_method` remains the human-readable description (for reporting).
++    `check` is the actual executable predicate: given a candidate, return
++    True if the falsifier TRIGGERS (i.e. the candidate fails this check).
++    If `check` is None, the falsifier is descriptive-only and cannot
++    contribute to elimination -- this is intentional so that unwired
++    falsifiers don't silently pretend to have been applied.
++    """
+     name: str
+     description: str
+     test_method: str
+     domain: str
+     criticality: float  # 0.0 to 1.0
++    check: Optional[Callable[["CandidateStructure"], bool]] = None
+     applied: bool = False
+     result: Optional[bool] = None  # True if falsifier triggered
+     evidence: Optional[str] = None
+ 
++    def is_executable(self) -> bool:
++        return self.check is not None
++
+ 
+ @dataclass
+ class EliminationTrace:
+diff --git a/scope_runtime/runtime.py b/scope_runtime/runtime.py
+index 17d8052..6ea411c 100644
+--- a/scope_runtime/runtime.py
++++ b/scope_runtime/runtime.py
+@@ -70,40 +70,63 @@ class ScopeRuntime:
+             initial_candidate_count=scope_run.total_candidates(),
+         )
+     
+-    def execute(self) -> ScopeExecutionResult:
+-        """Execute SCOPE protocol: Generate → Constrain → Pressure → Prune → Measure."""
+-        
++    def execute(self, max_iterations: int = 8) -> ScopeExecutionResult:
++        """Execute SCOPE protocol as a real loop, matching the paper's own
++        pseudocode: 'while EliminativeWorkExists(Graph): ... '.
++
++        A single pass through Constrain/Pressure/Prune/Measure cannot,
++        by construction, ever accumulate the DRE history window needed
++        to detect drift (window_size=5). This loops the pressure/prune/
++        measure cycle until either no further eliminative work occurs
++        or max_iterations is hit, so drift and admissibility are actually
++        checkable from one execute() call, the way the spec describes.
++        """
+         self.result.add_log_entry(
+             f"SCOPE execution started: {self.scope_run.host_domain}"
+         )
+-        
++
+         try:
+-            # Phase 1: Constrain (validate constraints)
+             self._phase_constrain()
+-            
+-            # Phase 2: Pressure (apply falsifiers)
+-            self._phase_pressure()
+-            
+-            # Phase 3: Prune (eliminate non-viable candidates)
+-            self._phase_prune()
+-            
+-            # Phase 4: Measure (evaluate elimination)
+-            self._phase_measure()
+-            
+-            # Check termination condition
++
++            previous_viable = self.scope_run.total_candidates()
++
++            for iteration in range(1, max_iterations + 1):
++                self.result.iteration_count = iteration
++                self.result.add_log_entry(f"--- Iteration {iteration} ---")
++
++                newly_eliminated = self._phase_pressure_and_prune()
++
++                viable_now = sum(
++                    1 for c in self.scope_run.candidate_claim_set if not c.eliminated
++                )
++
++                self._phase_measure(
++                    previous_viable=previous_viable,
++                    viable_now=viable_now,
++                    eliminated_this_round=newly_eliminated,
++                )
++
++                previous_viable = viable_now
++
++                if newly_eliminated == 0:
++                    self.result.add_log_entry(
++                        "No eliminative work this iteration -- stopping loop."
++                    )
++                    break
++
+             self._check_termination()
+-            
++
+         except Exception as e:
+             self.result.add_log_entry(f"Execution error: {str(e)}")
+             self.result.admissible = False
+             self.result.termination_reason = f"Execution error: {str(e)}"
+-        
++
+         finally:
+             self.result.execution_completed = datetime.now()
+             self.result.final_viable_candidates = sum(
+                 1 for c in self.scope_run.candidate_claim_set if not c.eliminated
+             )
+-        
++
+         return self.result
+     
+     def _phase_constrain(self) -> None:
+@@ -120,79 +143,106 @@ class ScopeRuntime:
+             f"  - Total candidates: {len(self.scope_run.candidate_claim_set)}"
+         )
+     
+-    def _phase_pressure(self) -> None:
+-        """Pressure: Apply falsifiers against candidates."""
+-        self.result.add_log_entry(
+-            f"Phase 2: PRESSURE - Applying {len(self.scope_run.domain_indexed_falsifiers)} falsifiers"
+-        )
+-        
+-        for falsifier in self.scope_run.domain_indexed_falsifiers:
+-            self.result.add_log_entry(
+-                f"  - Applying: {falsifier.name} (criticality: {falsifier.criticality})"
+-            )
+-    
+-    def _phase_prune(self) -> None:
+-        """Prune: Eliminate candidates that fail constraints/falsifiers."""
++    def _phase_pressure_and_prune(self) -> int:
++        """Pressure + Prune, actually connected this time.
++
++        For each surviving candidate, every executable falsifier whose
++        domain matches (or applies globally) is actually called against
++        that candidate. If it triggers (returns True), the candidate is
++        eliminated with a real reason and a real falsifier reference.
++        Falsifiers with no `check` are logged as descriptive-only and
++        never contribute to elimination -- they cannot silently pass.
++        """
+         self.result.add_log_entry(
+-            f"Phase 3: PRUNE - Evaluating candidates for elimination"
++            f"PRESSURE+PRUNE - {len(self.scope_run.domain_indexed_falsifiers)} falsifiers "
++            f"against {sum(1 for c in self.scope_run.candidate_claim_set if not c.eliminated)} "
++            f"surviving candidates"
+         )
+-        
+-        # Simulate pruning
++
+         eliminated_count = 0
++
+         for candidate in self.scope_run.candidate_claim_set:
+-            # Simple heuristic: high assumption density increases elimination likelihood
+-            if candidate.assumption_count() > 4:
+-                candidate.eliminated = True
+-                eliminated_count += 1
+-                
+-                trace = EliminationTrace(
+-                    timestamp=datetime.now(),
+-                    candidate_name=candidate.name,
+-                    category=EliminationCategory.EPISTEMIC,
+-                    reason=f"High assumption density: {candidate.assumption_count()} assumptions",
+-                    epistemic_yield=0.25,
+-                )
+-                self.result.add_elimination_trace(trace)
+-        
+-        self.result.add_log_entry(
+-            f"  - Candidates eliminated: {eliminated_count}"
+-        )
+-    
+-    def _phase_measure(self) -> None:
+-        """Measure: Calculate eliminative work and DRE."""
+-        self.result.add_log_entry(
+-            f"Phase 4: MEASURE - Calculating eliminative work"
+-        )
+-        
+-        viable_count = sum(
+-            1 for c in self.scope_run.candidate_claim_set if not c.eliminated
++            if candidate.eliminated:
++                continue
++
++            for falsifier in self.scope_run.domain_indexed_falsifiers:
++                if not falsifier.is_executable():
++                    self.result.add_log_entry(
++                        f"  - SKIP (no executable check): {falsifier.name} "
++                        f"-- descriptive only, cannot eliminate anything"
++                    )
++                    continue
++
++                falsifier.applied = True
++                triggered = falsifier.check(candidate)
++
++                if triggered:
++                    falsifier.result = True
++                    candidate.eliminated = True
++                    candidate.elimination_reason = (
++                        f"Falsified by '{falsifier.name}': {falsifier.description}"
++                    )
++                    eliminated_count += 1
++
++                    trace = EliminationTrace(
++                        timestamp=datetime.now(),
++                        candidate_name=candidate.name,
++                        category=EliminationCategory.EPISTEMIC,
++                        reason=candidate.elimination_reason,
++                        falsifier_applied=falsifier.name,
++                        epistemic_yield=falsifier.criticality,
++                    )
++                    self.result.add_elimination_trace(trace)
++                    self.result.add_log_entry(
++                        f"  - ELIMINATED: {candidate.name} via {falsifier.name} "
++                        f"(criticality {falsifier.criticality})"
++                    )
++                    break  # candidate is dead, no need to test further falsifiers
++                else:
++                    falsifier.result = False
++
++        self.result.add_log_entry(f"  - Eliminated this iteration: {eliminated_count}")
++        return eliminated_count
++
++    def _phase_measure(self, previous_viable: int, viable_now: int, eliminated_this_round: int) -> None:
++        """Measure: Calculate eliminative work and DRE for this iteration."""
++        new_falsifiers_applied = sum(
++            1 for f in self.scope_run.domain_indexed_falsifiers if f.applied
+         )
+-        
++
+         dre_result = self.dre_calculator.calculate(
+-            viable_candidates=viable_count,
+-            previous_viable_count=self.scope_run.total_candidates(),
+-            new_falsifiers=len(self.scope_run.domain_indexed_falsifiers),
+-            eliminative_work=len(self.result.elimination_traces) * 0.1,
++            viable_candidates=viable_now,
++            previous_viable_count=previous_viable,
++            new_falsifiers=new_falsifiers_applied,
++            eliminative_work=eliminated_this_round * 0.25,
+         )
+-        
++
+         self.result.dre_history.append(dre_result)
+         self.result.add_log_entry(
+-            f"  - ΔH: {dre_result.delta_h:.3f}"
+-        )
+-        self.result.add_log_entry(
+-            f"  - Viable candidates: {dre_result.viable_candidate_count}"
+-        )
+-        self.result.add_log_entry(
+-            f"  - Drift detected: {dre_result.drift_detected}"
++            f"  - ΔH: {dre_result.delta_h:.3f}  "
++            f"viable: {dre_result.viable_candidate_count}  "
++            f"drift: {dre_result.drift_detected}"
+         )
+     
+     def _check_termination(self) -> None:
+         """Check if termination conditions are met."""
++        # final_viable_candidates isn't set until execute()'s `finally` block,
++        # so compute survival rate directly here instead of via self.result
++        # (previously this always read 0.0%, even on healthy runs).
++        viable_now = sum(
++            1 for c in self.scope_run.candidate_claim_set if not c.eliminated
++        )
++        total = self.result.initial_candidate_count
++        survival_rate_now = (viable_now / total) if total else 0.0
++
+         if not self.result.dre_history:
++            self.result.add_log_entry(
++                f"Admissibility maintained - survival rate: {survival_rate_now:.1%}"
++            )
+             return
+-        
++
+         latest_dre = self.result.dre_history[-1]
+-        
++
+         if latest_dre.drift_detected:
+             self.result.admissible = False
+             self.result.termination_reason = "Recursive drift detected"
+@@ -201,7 +251,7 @@ class ScopeRuntime:
+             )
+         else:
+             self.result.add_log_entry(
+-                f"Admissibility maintained - survival rate: {self.result.survival_rate():.1%}"
++                f"Admissibility maintained - survival rate: {survival_rate_now:.1%}"
+             )
+     
+     def generate_report(self) -> Dict[str, Any]:

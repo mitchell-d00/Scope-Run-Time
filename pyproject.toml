@@ -11,9 +11,6 @@ requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [ { name = "mitchell-d00" } ]
 
-[tool.setuptools]
-packages = { find = {} }
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["scope_runtime*", "scope_utils*"]
