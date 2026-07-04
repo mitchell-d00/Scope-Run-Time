@@ -72,14 +72,13 @@ class ScopeRuntime:
     
     def execute(self, max_iterations: int = 8) -> ScopeExecutionResult:
         """Execute SCOPE protocol as a real loop, matching the paper's own
-        pseudocode: 'while EliminativeWorkExists(Graph): ... '.
+        pseudocode: 'while EliminativeWorkExists(Graph): ...'.
 
         A single pass through Constrain/Pressure/Prune/Measure cannot,
         by construction, ever accumulate the DRE history window needed
         to detect drift (window_size=5). This loops the pressure/prune/
         measure cycle until either no further eliminative work occurs
-        or max_iterations is hit, so drift and admissibility are actually
-        checkable from one execute() call, the way the spec describes.
+        or max_iterations is hit.
         """
         self.result.add_log_entry(
             f"SCOPE execution started: {self.scope_run.host_domain}"
@@ -144,14 +143,13 @@ class ScopeRuntime:
         )
     
     def _phase_pressure_and_prune(self) -> int:
-        """Pressure + Prune, actually connected this time.
+        """Pressure + Prune, actually connected.
 
-        For each surviving candidate, every executable falsifier whose
-        domain matches (or applies globally) is actually called against
-        that candidate. If it triggers (returns True), the candidate is
-        eliminated with a real reason and a real falsifier reference.
-        Falsifiers with no `check` are logged as descriptive-only and
-        never contribute to elimination -- they cannot silently pass.
+        For each surviving candidate, every executable falsifier is
+        actually called against it. If it triggers (returns True), the
+        candidate is eliminated with a real reason and a real reference
+        to which falsifier did it. Falsifiers with no `check` are logged
+        as descriptive-only and never contribute to elimination.
         """
         self.result.add_log_entry(
             f"PRESSURE+PRUNE - {len(self.scope_run.domain_indexed_falsifiers)} falsifiers "
@@ -197,7 +195,7 @@ class ScopeRuntime:
                         f"  - ELIMINATED: {candidate.name} via {falsifier.name} "
                         f"(criticality {falsifier.criticality})"
                     )
-                    break  # candidate is dead, no need to test further falsifiers
+                    break
                 else:
                     falsifier.result = False
 
@@ -228,7 +226,7 @@ class ScopeRuntime:
         """Check if termination conditions are met."""
         # final_viable_candidates isn't set until execute()'s `finally` block,
         # so compute survival rate directly here instead of via self.result
-        # (previously this always read 0.0%, even on healthy runs).
+        # (previously this always logged 0.0%, even on healthy runs).
         viable_now = sum(
             1 for c in self.scope_run.candidate_claim_set if not c.eliminated
         )

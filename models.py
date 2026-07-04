@@ -62,8 +62,8 @@ class Falsifier:
     `check` is the actual executable predicate: given a candidate, return
     True if the falsifier TRIGGERS (i.e. the candidate fails this check).
     If `check` is None, the falsifier is descriptive-only and cannot
-    contribute to elimination -- this is intentional so that unwired
-    falsifiers don't silently pretend to have been applied.
+    contribute to elimination -- this is intentional so an unwired
+    falsifier can't silently pretend to have been applied.
     """
     name: str
     description: str
